@@ -16,20 +16,23 @@
 
 package org.opencb.opencga.analysis;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.opencb.biodata.models.variant.StudyEntry;
-import org.opencb.datastore.core.ObjectMap;
-import org.opencb.datastore.core.QueryOptions;
-import org.opencb.datastore.core.QueryResult;
-import org.opencb.opencga.analysis.files.FileMetadataReader;
-import org.opencb.opencga.analysis.files.FileScanner;
-import org.opencb.opencga.catalog.CatalogManager;
-import org.opencb.opencga.catalog.db.api.CatalogSampleDBAdaptor;
+import org.opencb.commons.datastore.core.ObjectMap;
+import org.opencb.commons.datastore.core.Query;
+import org.opencb.commons.datastore.core.QueryOptions;
+import org.opencb.commons.datastore.core.QueryResult;
+import org.opencb.opencga.catalog.utils.FileMetadataReader;
+import org.opencb.opencga.catalog.utils.FileScanner;
+import org.opencb.opencga.catalog.managers.CatalogManager;
+import org.opencb.opencga.catalog.db.api.CatalogCohortDBAdaptor;
 import org.opencb.opencga.catalog.exceptions.CatalogException;
 import org.opencb.opencga.catalog.io.CatalogIOManager;
 import org.opencb.opencga.catalog.models.Cohort;
 import org.opencb.opencga.catalog.models.File;
-import org.opencb.opencga.catalog.models.Index;
+import org.opencb.opencga.catalog.models.FileIndex;
 import org.opencb.opencga.catalog.models.Job;
+import org.opencb.opencga.storage.core.StorageETLResult;
 import org.opencb.opencga.storage.core.variant.VariantStorageManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,6 +59,7 @@ public class AnalysisOutputRecorder {
     private final String sessionId;
     private final boolean calculateChecksum = false;    //TODO: Read from config file
     private final FileScanner.FileScannerPolicy fileScannerPolicy = FileScanner.FileScannerPolicy.DELETE; //TODO: Read from config file
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public AnalysisOutputRecorder(CatalogManager catalogManager, String sessionId) {
         this.catalogManager = catalogManager;
@@ -85,7 +89,7 @@ public class AnalysisOutputRecorder {
 
             FileScanner fileScanner = new FileScanner(catalogManager);
             List<File> files = fileScanner.scan(outDir, tmpOutDirUri, fileScannerPolicy, calculateChecksum, true, job.getId(), sessionId);
-            List<Integer> fileIds = files.stream().map(File::getId).collect(Collectors.toList());
+            List<Long> fileIds = files.stream().map(File::getId).collect(Collectors.toList());
             CatalogIOManager ioManager = catalogManager.getCatalogIOManagerFactory().get(tmpOutDirUri);
             if (!ioManager.exists(tmpOutDirUri)) {
                 logger.warn("Output folder doesn't exist");
@@ -118,77 +122,126 @@ public class AnalysisOutputRecorder {
                 job.getAttributes().get(Job.TYPE).toString() : Job.Type.ANALYSIS.toString();
         switch(Job.Type.valueOf(type)) {
             case INDEX:
-                Integer indexedFileId = (Integer) job.getAttributes().get(Job.INDEXED_FILE_ID);
-                File indexedFile = catalogManager.getFile(indexedFileId, sessionId).first();
-                final Index index;
-                if (indexedFile.getIndex() != null) {
-                    index = indexedFile.getIndex();
-                    switch (index.getStatus()) {
-                        case NONE:
-                        case TRANSFORMED:
-                            logger.warn("Unexpected index status. Expected "
-                                    + Index.Status.TRANSFORMING + ", "
-                                    + Index.Status.LOADING + " or "
-                                    + Index.Status.INDEXING
-                                    + " and got " + index.getStatus());
-                        case READY: //Do not show warn message when index status is READY.
-                            break;
-                        case TRANSFORMING:
-                            if (jobFailed) {
-                                logger.warn("Job failed. Restoring status from " +
-                                        Index.Status.TRANSFORMING + " to " + Index.Status.NONE);
-                                index.setStatus(Index.Status.NONE);
-                            } else {
-                                index.setStatus(Index.Status.TRANSFORMED);
-                                FileMetadataReader.get(catalogManager).updateVariantFileStats(job, sessionId);
-                            }
-                            break;
-                        case LOADING:
-                            if (jobFailed) {
-                                logger.warn("Job failed. Restoring status from " +
-                                        Index.Status.LOADING + " to " + Index.Status.TRANSFORMED);
-                                index.setStatus(Index.Status.TRANSFORMED);
-                            } else {
-                                index.setStatus(Index.Status.READY);
-                            }
-                            break;
-                        case INDEXING:
-                            if (jobFailed) {
-                                logger.warn("Job failed. Restoring status from " +
-                                        Index.Status.INDEXING + " to " + Index.Status.NONE);
-                                index.setStatus(Index.Status.NONE);
-                            } else {
-                                index.setStatus(Index.Status.READY);
-                                FileMetadataReader.get(catalogManager).updateVariantFileStats(job, sessionId);
-                            }
-                            break;
-                    }
-                } else {
-                    index = new Index(job.getUserId(), job.getDate(), Index.Status.READY, job.getId(), new HashMap<>());
-                    logger.warn("Expected INDEX object on the indexed file " +
-                            "{ id:" + indexedFile.getId() + ", path:\"" + indexedFile.getPath() + "\"}");
-                }
-                catalogManager.modifyFile(indexedFileId, new ObjectMap("index", index), sessionId); //Modify status
-                if (index.getStatus().equals(Index.Status.READY) && Boolean.parseBoolean(job.getAttributes().getOrDefault(VariantStorageManager.Options.CALCULATE_STATS.key(), VariantStorageManager.Options.CALCULATE_STATS.defaultValue()).toString())) {
-                    QueryResult<Cohort> queryResult = catalogManager.getAllCohorts(catalogManager.getStudyIdByJobId(job.getId()), new QueryOptions(CatalogSampleDBAdaptor.CohortFilterOption.name.toString(), StudyEntry.DEFAULT_COHORT), sessionId);
-                    if (queryResult.getNumResults() != 0) {
-                        logger.debug("Default cohort status set to READY");
-                        Cohort defaultCohort = queryResult.first();
-                        catalogManager.modifyCohort(defaultCohort.getId(), new ObjectMap("status", Cohort.Status.READY), sessionId);
-                    }
-                }
+                final StorageETLResult storageETLResult = readStorageETLResult(job.getId());
+                postProcessIndexJob(job, storageETLResult, null, sessionId);
                 break;
             case COHORT_STATS:
                 List<Integer> cohortIds = new ObjectMap(job.getAttributes()).getAsIntegerList("cohortIds");
-                ObjectMap updateParams = new ObjectMap("status", jobFailed? Cohort.Status.INVALID : Cohort.Status.READY);
+                ObjectMap updateParams = new ObjectMap(CatalogCohortDBAdaptor.QueryParams.STATUS_NAME.key(), jobFailed? Cohort.CohortStatus.INVALID : Cohort.CohortStatus.READY);
                 for (Integer cohortId : cohortIds) {
-                    catalogManager.modifyCohort(cohortId, updateParams, sessionId);
+                    catalogManager.modifyCohort(cohortId, updateParams, new QueryOptions(), sessionId);
                 }
                 break;
             case ANALYSIS:
                 break;
             default:
                 break;
+        }
+    }
+
+    public void saveStorageResult(Job job, StorageETLResult storageETLResult) throws CatalogException {
+        if (storageETLResult != null) {
+            catalogManager.modifyJob(job.getId(), new ObjectMap("attributes", new ObjectMap("storageETLResult", storageETLResult)), sessionId);
+        }
+    }
+
+    public StorageETLResult readStorageETLResult(long jobId) throws CatalogException {
+        Object object = catalogManager.getJob(jobId, null, sessionId).first().getAttributes().get("storageETLResult");
+        final StorageETLResult storageETLResult;
+        try {
+            if (object != null) {
+                storageETLResult = objectMapper.readValue(objectMapper.writeValueAsString(object), StorageETLResult.class);
+            } else {
+                storageETLResult = null;
+            }
+        } catch (IOException e) {
+            throw new CatalogException(e);
+        }
+        return storageETLResult;
+    }
+
+    public void postProcessIndexJob(Job job, StorageETLResult storageETLResult, Exception e, String sessionId) throws CatalogException {
+        boolean jobFailed = storageETLResult == null || storageETLResult.getLoadError() != null || storageETLResult.getTransformError() != null;
+
+        Long indexedFileId = ((Number) job.getAttributes().get(Job.INDEXED_FILE_ID)).longValue();
+        File indexedFile = catalogManager.getFile(indexedFileId, sessionId).first();
+        final FileIndex index;
+
+        boolean transformedSuccess = storageETLResult != null && storageETLResult.isTransformExecuted() && storageETLResult.getTransformError() == null;
+        boolean loadedSuccess = storageETLResult != null && storageETLResult.isLoadExecuted() && storageETLResult.getLoadError() == null;
+
+        if (indexedFile.getIndex() != null) {
+            index = indexedFile.getIndex();
+            switch (index.getStatus().getName()) {
+                case FileIndex.IndexStatus.NONE:
+                case FileIndex.IndexStatus.TRANSFORMED:
+                    logger.warn("Unexpected index status. Expected "
+                            + FileIndex.IndexStatus.TRANSFORMING + ", "
+                            + FileIndex.IndexStatus.LOADING + " or "
+                            + FileIndex.IndexStatus.INDEXING
+                            + " and got " + index.getStatus());
+                case FileIndex.IndexStatus.READY: //Do not show warn message when index status is READY.
+                    break;
+                case FileIndex.IndexStatus.TRANSFORMING:
+                    if (jobFailed) {
+                        logger.warn("Job failed. Restoring status from " +
+                                FileIndex.IndexStatus.TRANSFORMING + " to " + FileIndex.IndexStatus.NONE);
+                        index.getStatus().setName(FileIndex.IndexStatus.NONE);
+                    } else {
+                        index.getStatus().setName(FileIndex.IndexStatus.TRANSFORMED);
+                    }
+                    break;
+                case FileIndex.IndexStatus.LOADING:
+                    if (jobFailed) {
+                        logger.warn("Job failed. Restoring status from " +
+                                FileIndex.IndexStatus.LOADING + " to " + FileIndex.IndexStatus.TRANSFORMED);
+                        index.getStatus().setName(FileIndex.IndexStatus.TRANSFORMED);
+                    } else {
+                        index.getStatus().setName(FileIndex.IndexStatus.READY);
+                    }
+                    break;
+                case FileIndex.IndexStatus.INDEXING:
+                    if (jobFailed) {
+                        String newStatus;
+                        // If transform was executed, restore status to Transformed.
+                        if (transformedSuccess) {
+                            newStatus = FileIndex.IndexStatus.TRANSFORMED;
+                        } else {
+                            newStatus = FileIndex.IndexStatus.NONE;
+                        }
+                        logger.warn("Job failed. Restoring status from " +
+                                FileIndex.IndexStatus.INDEXING + " to " + newStatus);
+                        index.getStatus().setName(newStatus);
+                    } else {
+                        index.getStatus().setName(FileIndex.IndexStatus.READY);
+                    }
+                    break;
+            }
+        } else {
+            index = new FileIndex(job.getUserId(), job.getCreationDate(), new FileIndex.IndexStatus(FileIndex.IndexStatus.READY), job.getId(),
+                    new HashMap<>());
+            logger.warn("Expected INDEX object on the indexed file " +
+                    "{ id:" + indexedFile.getId() + ", path:\"" + indexedFile.getPath() + "\"}");
+        }
+
+        if (transformedSuccess) {
+            FileMetadataReader.get(catalogManager).updateVariantFileStats(job, sessionId);
+        }
+
+        catalogManager.modifyFile(indexedFileId, new ObjectMap("index", index), sessionId); //Modify status
+        boolean calculateStats = Boolean.parseBoolean(job.getAttributes().getOrDefault(VariantStorageManager.Options.CALCULATE_STATS.key(),
+                VariantStorageManager.Options.CALCULATE_STATS.defaultValue()).toString());
+
+        if (index.getStatus().getName().equals(FileIndex.IndexStatus.READY) && calculateStats) {
+            QueryResult<Cohort> queryResult = catalogManager.getAllCohorts(catalogManager.getStudyIdByJobId(job.getId()),
+                    new Query(CatalogCohortDBAdaptor.QueryParams.NAME.key(), StudyEntry.DEFAULT_COHORT), new QueryOptions(), sessionId);
+            if (queryResult.getNumResults() != 0) {
+                logger.debug("Default cohort status set to READY");
+                Cohort defaultCohort = queryResult.first();
+                catalogManager.modifyCohort(defaultCohort.getId(),
+                        new ObjectMap(CatalogCohortDBAdaptor.QueryParams.STATUS_NAME.key(), Cohort.CohortStatus.READY),
+                        new QueryOptions(), sessionId);
+            }
         }
     }
 
