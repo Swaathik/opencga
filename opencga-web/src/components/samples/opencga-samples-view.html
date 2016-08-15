@@ -23,8 +23,8 @@
             }
         </style>
 
-        <table id="samplestable" data-search="true" data-show-columns="true" data-pagination="true" data-page-list="[10, 25, 50]"
-               data-striped="true">
+        <table id="samplestable" data-search="true" data-show-columns="true" data-pagination="true" data-page-list="[10, 25, 50]">
+            <thead style="background-color: #eee"></thead>
         </table>
 
         <div style="padding: 10px;" class="row" style="height: 530px">
@@ -36,27 +36,42 @@
 
             <div class="tab-content">
                 <div id="sampleViewAnnotation" role="tabpanel" class="tab-pane active">
-                    <template is="dom-repeat" items="{{_sample.annotationSets}}" as="annotationSet">
+                    <template is="dom-repeat" items="{{variableSets}}" as="variableSet">
+                        <h3><i id="id{{variableSet.id}}" class="fa fa-minus-circle" aria-hidden="true" on-click="iconChange"></i> {{variableSet.name}}</h3>
 
-                        <h3>{{annotationSet.id}} ({{annotationSet.date}})</h3>
+                        <!--<table id="{{variableSet.id}}" data-search="true" data-show-columns="true" data-pagination="true" data-page-list="[10, 25, 50]">-->
+                            <!--<thead style="background-color: #eee"></thead>-->
+                        <!--</table>-->
 
-                        <table class="table table-hover">
-                            <thead>
+                        <!--To be changed to a grid-->
+                        <table id="{{variableSet.id}}" class="table table-hover table-bordered">
+                            <thead style="background-color: #eee">
                             <tr>
-                                <th>ID</th>
-                                <th>Value</th>
+                                <th>VariableSet</th>
+                                <template is="dom-repeat" items="{{samples}}" as="sample">
+                                    <th>{{sample.name}}</th>
+                                </template>
                             </tr>
                             </thead>
                             <tbody>
-                            <template is="dom-repeat" items="{{annotationSet.annotations}}" as="annotation">
+                            <template is="dom-repeat" items="{{variableSet.variables}}" as="variable">
                                 <tr>
-                                    <td>{{annotation.id}}</td>
-                                    <td>{{annotation.value}}</td>
+                                    <td>{{variable.name}}</td>
+                                    <template is="dom-repeat" items="{{samples}}" as="sample">
+                                        <template is="dom-repeat" items="{{sample.annotationSets}}" as="annotationSet">
+                                            <template is="dom-repeat" items="{{annotationSet.annotations}}"
+                                                      as="annotation">
+                                                <template is="dom-if"
+                                                          if="{{matchVariableSet(variable, annotation)}}">
+                                                    <td>{{annotation.value}}</td>
+                                                </template>
+                                            </template>
+                                        </template>
+                                    </template>
                                 </tr>
                             </template>
                             </tbody>
                         </table>
-
                     </template>
                 </div>
 
@@ -90,8 +105,8 @@
                     value: {},
                     observer: 'renderFromServer'
                 },
-                sample: {
-                    type: Object
+                samples: {
+                    type: Array
                 }
             },
 
@@ -99,6 +114,10 @@
                 // Columns that will be represented
                 this._columns = [
                     [
+                        {
+                            field: 'state',
+                            checkbox: true
+                        },
                         {
                             title: 'Name',
                             field: 'name',
@@ -118,15 +137,16 @@
             },
 
             renderFromServer: function() {
+                this.samples = [];
+                let _this = this;
                 if (this.opencgaClient instanceof OpenCGAClient && this.studyId > 0) {
-                    this._url = 'http://' + this.opencgaClient.getConfig().host +  '/webservices/rest/v1/samples/search';
-                    let _this = this;
+                    this._url = 'http://' + this.opencgaClient.getConfig().host + '/webservices/rest/v1/samples/search';
 
                     $('#samplestable').bootstrapTable('destroy');
                     $('#samplestable').bootstrapTable({
                         url: this._url,
                         sidePagination: 'server',
-                        queryParams: function(params) {
+                        queryParams: function (params) {
                             let auxParams = {
                                 studyId: _this.studyId,
                                 sid: Cookies.get(_this.opencgaClient.getConfig().cookieSessionId),
@@ -140,7 +160,7 @@
                             }
                             return $.extend({}, _this.filters, auxParams);
                         },
-                        responseHandler: function(response) {
+                        responseHandler: function (response) {
                             if (!_this.hasOwnProperty("numTotalResults")) {
                                 _this.numTotalResults = 0;
                             }
@@ -154,14 +174,49 @@
                                 rows: response.response[0].result
                             }
                         },
-                        columns: this._columns,
-                        onClickRow: function(row, $element) {
-                            _this._sample = row;
-                            $('.success').removeClass('success');
-                            $($element).addClass('success');
-                        }
+                        columns: this._columns
                     });
+
+                    // Getting the selected samples through onCheck event of bootstrap table and passing to the filter
+                    $('#samplestable').on('check.bs.table uncheck.bs.table check-all.bs.table uncheck-all.bs.table ' +
+                            'check-some.bs.table uncheck-some.bs.table', function () {
+                        _this.samples = _this.getSampleName();
+                        console.log(_this.samples)
+                    });
+
+                    this.opencgaClient.studies().info(this.studyId, {include: "variableSets"}).then(function (response) {
+                        _this.variableSets = response.response[0].result[0].variableSets;
+                        for (let i = 0; i < _this.variableSets.length; i++) {
+                            let sortedVariableSet = _this.variableSets[i].variables;
+                            sortedVariableSet.sort(function sortByRank(a, b) {
+                                if (a.rank > b.rank) {
+                                    return 1;
+                                }
+                                if (a.rank < b.rank) {
+                                    return -1;
+                                }
+                                return 0;
+                            });
+                            _this.variableSets[i].varibles = sortedVariableSet;
+                        }
+                    }).catch(function() {
+                        console.log("Could not obtain the variable sets of the study " + _this.studyId);
+                    });
+
                 }
+            },
+            getSampleName: function() {
+                return $.map($('#samplestable').bootstrapTable('getSelections'), function (row) {
+                    return row;
+                });
+            },
+            matchVariableSet: function (variable, annotation) {
+                return variable.name == annotation.name;
+            },
+            iconChange: function (e) {
+                let id = e.model.__data__.variableSet.id;
+                $('#id' + id).toggleClass('fa-minus-circle fa-plus-circle');
+                $('#' + id).toggleClass('collapse collapse-in');
             },
             renderLocally: function() {
                 let _this = this;
