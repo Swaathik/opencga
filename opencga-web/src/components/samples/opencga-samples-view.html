@@ -36,15 +36,20 @@
 
             <div class="tab-content">
                 <div id="sampleViewAnnotation" role="tabpanel" class="tab-pane active">
+                    <!--<table id="Table" data-search="true" data-show-columns="true" data-pagination="true" data-page-list="[10, 25, 50]">-->
+                        <!--<thead style="background-color: #eee"></thead>-->
+                    <!--</table>-->
                     <template is="dom-repeat" items="{{variableSets}}" as="variableSet">
-                        <h3><i id="id{{variableSet.id}}" class="fa fa-minus-circle" aria-hidden="true" on-click="iconChange"></i> {{variableSet.name}}</h3>
+                        <h3><i id="{{variableSet.id}}" class="fa fa-minus-circle" aria-hidden="true" on-click="iconChange"></i> {{variableSet.name}}</h3>
 
-                        <!--<table id="{{variableSet.id}}" data-search="true" data-show-columns="true" data-pagination="true" data-page-list="[10, 25, 50]">-->
+                        <!--<table id="{{variableSet.id}}Table" data-search="true" data-show-columns="true" data-pagination="true" data-page-list="[10, 25, 50]">-->
                             <!--<thead style="background-color: #eee"></thead>-->
                         <!--</table>-->
 
+
+
                         <!--To be changed to a grid-->
-                        <table id="{{variableSet.id}}" class="table table-hover table-bordered">
+                        <table id="{{variableSet.id}}Table" class="table table-hover table-bordered">
                             <thead style="background-color: #eee">
                             <tr>
                                 <th>VariableSet</th>
@@ -61,11 +66,13 @@
                                         <template is="dom-repeat" items="{{sample.annotationSets}}" as="annotationSet">
                                             <template is="dom-repeat" items="{{annotationSet.annotations}}"
                                                       as="annotation">
-                                                <template is="dom-if"
-                                                          if="{{matchVariableSet(variable, annotation)}}">
+                                                <template is="dom-if" if="{{matchVariableSet(variable, annotation)}}">
                                                     <td>{{annotation.value}}</td>
                                                 </template>
                                             </template>
+                                        </template>
+                                        <template is="dom-if" if="{{checkAnnotationSet(sample)}}">
+                                            <td>No annotations available</td>
                                         </template>
                                     </template>
                                 </tr>
@@ -106,7 +113,8 @@
                     observer: 'renderFromServer'
                 },
                 samples: {
-                    type: Array
+                    type: Array,
+                    observer: 'refreshVariableSetTable'
                 }
             },
 
@@ -198,6 +206,13 @@
                                 return 0;
                             });
                             _this.variableSets[i].varibles = sortedVariableSet;
+
+//                            $('#' + _this.variableSets[i].id + 'Table').bootstrapTable('destroy');
+                            $('#Table').bootstrapTable('destroy');
+                            $('#Table').bootstrapTable({
+                                data: _this.variableSets[i].variables,
+                                columns: _this.refreshVariableSetTable()
+                            });
                         }
                     }).catch(function() {
                         console.log("Could not obtain the variable sets of the study " + _this.studyId);
@@ -213,10 +228,13 @@
             matchVariableSet: function (variable, annotation) {
                 return variable.name == annotation.name;
             },
+            checkAnnotationSet: function(sample) {
+              return sample.annotationSets.length == 0;
+            },
             iconChange: function (e) {
                 let id = e.model.__data__.variableSet.id;
-                $('#id' + id).toggleClass('fa-minus-circle fa-plus-circle');
-                $('#' + id).toggleClass('collapse collapse-in');
+                $('#' + id).toggleClass('fa-minus-circle fa-plus-circle');
+                $('#' + id + 'Table').toggleClass('collapse collapse-in');
             },
             renderLocally: function() {
                 let _this = this;
@@ -230,6 +248,44 @@
                         }
                     });
                 }
+            },
+            refreshVariableSetTable: function () {
+                debugger
+                let _this = this;
+                let cols = [
+                    [
+                        {
+                            title: 'Variable Set',
+                            field: 'name',
+                            rowspan: 2,
+                            colspan: 1
+                        }
+                    ],
+                    [
+
+                    ]
+                ];
+                if (typeof cols !== "undefined") {
+                    cols[0].splice(1, 0, {
+                        title: 'Samples',
+                        rowspan: 1,
+                        colspan: _this.samples.length
+                    });
+                    for(let i = 0; i < _this.samples.length; i++) {
+                        cols[1].splice(i, 0,
+                                {
+                                    title: _this.samples[i].name,
+                                    rowspan: 1,
+                                    colspan: 1,
+                                    formatter: this.variableSetFormatter
+                                });
+                    }
+                    _this._variableSetColumns = cols;
+                    return cols;
+                }
+            },
+            variableSetFormatter: function (value, row, index) {
+
             }
 
         });
